@@ -57,6 +57,44 @@ resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
   role       = aws_iam_role.ebs_csi_driver.name
 }
 
+# IAM role for Crossplane AWS Provider
+resource "aws_iam_role" "crossplane_provider_aws" {
+  name = "${var.project_name}-${var.environment}-crossplane-provider-aws-${var.region}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Federated = var.oidc_provider_arn
+        }
+        Condition = {
+          StringEquals = {
+            "${var.oidc_provider}:sub" = "system:serviceaccount:crossplane-system:provider-aws-*"
+            "${var.oidc_provider}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# Attach PowerUserAccess policy (you may want to restrict this further)
+resource "aws_iam_role_policy_attachment" "crossplane_provider_aws" {
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+  role       = aws_iam_role.crossplane_provider_aws.name
+}
+
+# Attach IAMFullAccess policy for Crossplane to manage IAM resources
+resource "aws_iam_role_policy_attachment" "crossplane_provider_aws_iam" {
+  policy_arn = "arn:aws:iam::aws:policy/IAMFullAccess"
+  role       = aws_iam_role.crossplane_provider_aws.name
+}
+
 # CoreDNS Add-on
 resource "aws_eks_addon" "coredns" {
   cluster_name                = var.cluster_name
@@ -145,8 +183,6 @@ resource "helm_release" "nginx_ingress" {
     kubernetes_namespace.nginx_ingress,
     aws_eks_addon.ebs_csi_driver
   ]
-
-
 }
 
 # Create namespace for Crossplane
@@ -201,69 +237,114 @@ resource "helm_release" "crossplane" {
   ]
 }
 
-# ✅ Wait until Crossplane CRDs are available
-resource "null_resource" "wait_for_crds" {
+# Wait for Crossplane to be ready and then install AWS Provider via kubectl
+resource "null_resource" "install_crossplane_provider" {
   depends_on = [helm_release.crossplane]
 
   provisioner "local-exec" {
-    command = <<EOT
-for i in {1..30}; do
-  kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1 && exit 0
-  echo "Waiting for Crossplane CRDs..."
-  sleep 5
-done
-echo "Timeout waiting for Crossplane CRDs" && exit 1
-EOT
+    command = <<-EOT
+      # Wait for Crossplane CRDs to be available
+      for i in {1..60}; do
+        if aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region} --kubeconfig /tmp/kubeconfig-${var.cluster_name}; then
+          export KUBECONFIG=/tmp/kubeconfig-${var.cluster_name}
+          if kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
+            echo "CRDs are ready, installing provider..."
+            break
+          fi
+        fi
+        echo "Waiting for Crossplane CRDs to be available... ($i/60)"
+        sleep 10
+      done
+
+      # Create the provider
+      cat <<EOF | kubectl apply -f -
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws
+  namespace: crossplane-system
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.44.0
+EOF
+
+      # Wait for provider to be installed
+      echo "Waiting for AWS provider to be ready..."
+      for i in {1..30}; do
+        if kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Installed")].status}' | grep -q "True"; then
+          echo "AWS Provider is ready!"
+          break
+        fi
+        echo "Waiting for AWS provider installation... ($i/30)"
+        sleep 10
+      done
+    EOT
+  }
+
+  # Clean up kubeconfig on destroy
+  provisioner "local-exec" {
+    when    = destroy
+    command = "rm -f /tmp/kubeconfig-${self.triggers.cluster_name} || true"
+  }
+
+  # Trigger re-creation if cluster changes
+  triggers = {
+    cluster_name = var.cluster_name
+    region       = var.region
   }
 }
 
-# Crossplane AWS Provider Configuration
-resource "kubernetes_manifest" "crossplane_aws_provider" {
-  manifest = {
-    apiVersion = "pkg.crossplane.io/v1"
-    kind       = "Provider"
-    metadata = {
-      name      = "provider-aws"
-      namespace = "crossplane-system"
-    }
-    spec = {
-      package = "xpkg.upbound.io/crossplane-contrib/provider-aws:v0.44.0"
-    }
-  }
-
-  depends_on = [null_resource.wait_for_crds]
+# Wait a bit more to ensure provider is fully ready
+resource "time_sleep" "wait_for_provider_ready" {
+  depends_on      = [null_resource.install_crossplane_provider]
+  create_duration = "30s"
 }
 
-# Wait for AWS provider to be installed
-resource "null_resource" "wait_for_provider" {
-  depends_on = [kubernetes_manifest.crossplane_aws_provider]
+# Create ProviderConfig using kubectl to avoid API timing issues
+resource "null_resource" "create_provider_config" {
+  depends_on = [time_sleep.wait_for_provider_ready]
 
   provisioner "local-exec" {
-    command = <<EOT
-for i in {1..30}; do
-  kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system >/dev/null 2>&1 && exit 0
-  echo "Waiting for Crossplane AWS provider to be available..."
-  sleep 5
-done
-echo "Timeout waiting for provider-aws" && exit 1
-EOT
-  }
-}
+    command = <<-EOT
+      export KUBECONFIG=/tmp/kubeconfig-${self.triggers.cluster_name}
+      
+      # First create a ControllerConfig for IRSA
+      cat <<EOF | kubectl apply -f -
+apiVersion: pkg.crossplane.io/v1alpha1
+kind: ControllerConfig
+metadata:
+  name: aws-controller-config
+spec:
+  serviceAccountName: provider-aws
+  annotations:
+    eks.amazonaws.com/role-arn: ${self.triggers.crossplane_role_arn}
+EOF
 
-# Crossplane ProviderConfig for AWS
-resource "kubernetes_manifest" "crossplane_aws_provider_config" {
-  manifest = {
-    apiVersion = "aws.crossplane.io/v1beta1"
-    kind       = "ProviderConfig"
-    metadata = {
-      name = "default"
-    }
-    spec = {
-      credentials = {
-        source = "IRSA"
-      }
-    }
+      # Wait a bit for the ControllerConfig to be processed
+      sleep 10
+      
+      # Update the Provider to use the ControllerConfig
+      kubectl patch provider.pkg.crossplane.io provider-aws -n crossplane-system --type merge -p '{"spec":{"controllerConfigRef":{"name":"aws-controller-config"}}}'
+      
+      # Wait for provider to restart with new config
+      sleep 30
+      
+      # Create ProviderConfig with InjectedIdentity
+      cat <<EOF | kubectl apply -f -
+apiVersion: aws.crossplane.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: InjectedIdentity
+EOF
+    EOT
   }
 
-  depends_on = [null_resource.wait_for_provider]
+  # Trigger re-creation if cluster changes
+  triggers = {
+    cluster_name         = var.cluster_name
+    region              = var.region
+    crossplane_role_arn = aws_iam_role.crossplane_provider_aws.arn
+  }
 }

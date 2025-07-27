@@ -20,12 +20,12 @@ output "crossplane_namespace" {
   value       = kubernetes_namespace.crossplane_system.metadata[0].name
 }
 
-output "crossplane_role_arn" {
-  description = "ARN of the IAM role used by Crossplane"
-  value       = aws_iam_role.ebs_csi_driver.arn
-}
-
 output "ebs_csi_driver_role_arn" {
   description = "ARN of the IAM role used by EBS CSI Driver"
   value       = aws_iam_role.ebs_csi_driver.arn
+}
+
+output "crossplane_provider_role_arn" {
+  description = "ARN of the IAM role used by Crossplane AWS Provider"
+  value       = aws_iam_role.crossplane_provider_aws.arn
 }

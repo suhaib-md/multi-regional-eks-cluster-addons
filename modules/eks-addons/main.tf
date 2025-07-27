@@ -243,11 +243,147 @@ resource "time_sleep" "wait_for_crossplane_crds" {
   create_duration = "60s"
 }
 
+# Create the provider-aws service account explicitly
+resource "kubernetes_service_account" "crossplane_provider_aws" {
+  metadata {
+    name      = "provider-aws"
+    namespace = kubernetes_namespace.crossplane_system.metadata[0].name
+    annotations = {
+      "eks.amazonaws.com/role-arn" = aws_iam_role.crossplane_provider_aws.arn
+    }
+  }
+
+  depends_on = [time_sleep.wait_for_crossplane_crds]
+}
+
+# Create ClusterRole for Crossplane AWS Provider
+resource "kubernetes_cluster_role" "crossplane_provider_aws" {
+  metadata {
+    name = "crossplane-provider-aws"
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  rule {
+    api_groups = ["extensions"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  rule {
+    api_groups = ["rbac.authorization.k8s.io"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  rule {
+    api_groups = ["apiextensions.k8s.io"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  # Crossplane core resources
+  rule {
+    api_groups = ["crossplane.io"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  rule {
+    api_groups = ["pkg.crossplane.io"]
+    resources  = ["*"]
+    verbs      = ["*"]
+  }
+
+  # AWS Crossplane CRDs - comprehensive list
+  rule {
+    api_groups = [
+      "athena.aws.crossplane.io",
+      "route53resolver.aws.crossplane.io",
+      "ecr.aws.crossplane.io",
+      "dynamodb.aws.crossplane.io",
+      "s3.aws.crossplane.io",
+      "ec2.aws.crossplane.io",
+      "iam.aws.crossplane.io",
+      "rds.aws.crossplane.io",
+      "eks.aws.crossplane.io",
+      "lambda.aws.crossplane.io",
+      "sns.aws.crossplane.io",
+      "sqs.aws.crossplane.io",
+      "apigateway.aws.crossplane.io",
+      "apigatewayv2.aws.crossplane.io",
+      "batch.aws.crossplane.io",
+      "cloudformation.aws.crossplane.io",
+      "cloudfront.aws.crossplane.io",
+      "cloudtrail.aws.crossplane.io",
+      "cloudwatch.aws.crossplane.io",
+      "cloudwatchlogs.aws.crossplane.io",
+      "docdb.aws.crossplane.io",
+      "efs.aws.crossplane.io",
+      "elasticache.aws.crossplane.io",
+      "elbv2.aws.crossplane.io",
+      "kms.aws.crossplane.io",
+      "route53.aws.crossplane.io"
+    ]
+    resources = ["*"]
+    verbs     = ["*"]
+  }
+
+  depends_on = [helm_release.crossplane]
+}
+
+# Create ClusterRoleBinding for Crossplane AWS Provider
+resource "kubernetes_cluster_role_binding" "crossplane_provider_aws" {
+  metadata {
+    name = "crossplane-provider-aws"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role.crossplane_provider_aws.metadata[0].name
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = "provider-aws"
+    namespace = kubernetes_namespace.crossplane_system.metadata[0].name
+  }
+
+  # Also bind to any provider-aws-* service accounts (for versioned providers)
+  dynamic "subject" {
+    for_each = ["provider-aws-1a98473eeed4"]
+    content {
+      kind      = "ServiceAccount"
+      name      = subject.value
+      namespace = kubernetes_namespace.crossplane_system.metadata[0].name
+    }
+  }
+
+  depends_on = [helm_release.crossplane]
+}
+
 # Install Crossplane AWS Provider and configuration using kubectl
 resource "null_resource" "install_crossplane_provider" {
-  depends_on = [time_sleep.wait_for_crossplane_crds]
+  depends_on = [
+    time_sleep.wait_for_crossplane_crds,
+    kubernetes_service_account.crossplane_provider_aws,
+    kubernetes_cluster_role.crossplane_provider_aws,
+    kubernetes_cluster_role_binding.crossplane_provider_aws
+  ]
 
   provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
       # Update kubeconfig
       aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region} --kubeconfig /tmp/kubeconfig-${var.cluster_name}
@@ -255,7 +391,7 @@ resource "null_resource" "install_crossplane_provider" {
 
       # Wait for Crossplane CRDs to be available
       echo "Waiting for Crossplane CRDs to be available..."
-      for i in {1..60}; do
+      for i in $(seq 1 60); do
         if kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
           echo "Provider CRDs are ready!"
           break
@@ -263,6 +399,56 @@ resource "null_resource" "install_crossplane_provider" {
         echo "Waiting for Crossplane CRDs... ($i/60)"
         sleep 5
       done
+
+      # Create additional RBAC for provider service accounts
+      echo "Creating additional RBAC permissions..."
+      cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-provider-aws-extended
+rules:
+- apiGroups: [""]
+  resources: ["secrets", "configmaps", "events", "serviceaccounts"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+  verbs: ["*"]
+- apiGroups: ["*.aws.crossplane.io"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["pkg.crossplane.io"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["crossplane.io"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-provider-aws-extended
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-provider-aws-extended
+subjects:
+- kind: ServiceAccount
+  name: provider-aws
+  namespace: crossplane-system
+- kind: ServiceAccount
+  name: provider-aws-1a98473eeed4
+  namespace: crossplane-system
+EOF
 
       # Install the AWS provider
       echo "Installing Crossplane AWS Provider..."
@@ -276,22 +462,32 @@ spec:
   package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.44.0
 EOF
 
-      # Wait for provider to be installed and healthy
+      # Wait for provider to be installed
       echo "Waiting for AWS provider to be ready..."
-      for i in {1..120}; do
-        if kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Installed")].status}' 2>/dev/null | grep -q "True"; then
-          if kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null | grep -q "True"; then
-            echo "AWS Provider is installed and healthy!"
-            break
-          fi
+      for i in $(seq 1 180); do
+        INSTALLED=$(kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Installed")].status}' 2>/dev/null || echo "False")
+        HEALTHY=$(kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "False")
+        
+        if [ "$INSTALLED" = "True" ] && [ "$HEALTHY" = "True" ]; then
+          echo "AWS Provider is installed and healthy!"
+          break
         fi
-        echo "Waiting for AWS provider installation and health... ($i/120)"
+        
+        echo "Waiting for AWS provider installation and health... ($i/180) - Installed: $INSTALLED, Healthy: $HEALTHY"
+        
+        # Show provider status for debugging
+        remainder=$((i % 12))
+        if [ $remainder -eq 0 ]; then
+          echo "Provider status:"
+          kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o yaml | grep -A 10 "status:" || true
+        fi
+        
         sleep 10
       done
 
       # Wait for DeploymentRuntimeConfig CRD to be available
       echo "Waiting for DeploymentRuntimeConfig CRD..."
-      for i in {1..60}; do
+      for i in $(seq 1 60); do
         if kubectl get crd deploymentruntimeconfigs.pkg.crossplane.io >/dev/null 2>&1; then
           echo "DeploymentRuntimeConfig CRD is ready!"
           break
@@ -347,8 +543,22 @@ EOF
       kubectl patch provider provider-aws -n crossplane-system --type='merge' -p='{"spec":{"runtimeConfigRef":{"apiVersion":"pkg.crossplane.io/v1beta1","kind":"DeploymentRuntimeConfig","name":"provider-aws-config"}}}'
 
       # Wait for provider to restart with new config
-      echo "Waiting for provider to restart with new configuration..."
+      echo "Waiting for provider deployment to restart..."
       sleep 60
+
+      # Force restart the provider deployment if needed
+      echo "Restarting provider deployment..."
+      kubectl rollout restart deployment -l pkg.crossplane.io/provider=provider-aws -n crossplane-system || true
+      
+      # Wait for rollout to complete
+      for i in $(seq 1 60); do
+        if kubectl rollout status deployment -l pkg.crossplane.io/provider=provider-aws -n crossplane-system --timeout=10s >/dev/null 2>&1; then
+          echo "Provider deployment restarted successfully!"
+          break
+        fi
+        echo "Waiting for provider deployment restart... ($i/60)"
+        sleep 10
+      done
 
       # Create ProviderConfig
       echo "Creating ProviderConfig..."
@@ -361,6 +571,14 @@ spec:
   credentials:
     source: InjectedIdentity
 EOF
+
+      # Final status check
+      echo "Final provider status check..."
+      kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o yaml
+      echo "Provider deployments:"
+      kubectl get deployments -n crossplane-system -l pkg.crossplane.io/provider=provider-aws
+      echo "Provider pods:"
+      kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-aws
 
       echo "Crossplane AWS Provider installation completed!"
     EOT
@@ -379,5 +597,7 @@ EOF
     crossplane_role_arn = aws_iam_role.crossplane_provider_aws.arn
     # Add a version trigger to force updates when needed
     provider_version    = "v0.44.0"
+    # Add RBAC trigger
+    rbac_version        = "v2"
   }
 }

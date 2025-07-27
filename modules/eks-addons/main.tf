@@ -33,7 +33,7 @@ resource "aws_iam_role" "ebs_csi_driver" {
     Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
+        Action = "sts:AssumeRoleWithWebIdentity"  
         Effect = "Allow"
         Principal = {
           Federated = var.oidc_provider_arn
@@ -65,7 +65,7 @@ resource "aws_iam_role" "crossplane_provider_aws" {
     Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
+        Action = "sts:AssumeRoleWithWebIdentity" 
         Effect = "Allow"
         Principal = {
           Federated = var.oidc_provider_arn
@@ -237,9 +237,79 @@ resource "helm_release" "crossplane" {
   ]
 }
 
+# Create DeploymentRuntimeConfig for IRSA (replaces deprecated ControllerConfig)
+resource "kubernetes_manifest" "provider_runtime_config" {
+  depends_on = [helm_release.crossplane]
+  
+  manifest = {
+    apiVersion = "pkg.crossplane.io/v1beta1"
+    kind       = "DeploymentRuntimeConfig"
+    metadata = {
+      name = "provider-aws-config"
+    }
+    spec = {
+      deploymentTemplate = {
+        spec = {
+          selector = {}
+          template = {
+            spec = {
+              serviceAccountName = "provider-aws"
+              containers = [
+                {
+                  name = "package-runtime"
+                  env = [
+                    {
+                      name  = "AWS_ROLE_ARN"
+                      value = aws_iam_role.crossplane_provider_aws.arn
+                    },
+                    {
+                      name  = "AWS_WEB_IDENTITY_TOKEN_FILE"
+                      value = "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+                    }
+                  ]
+                  volumeMounts = [
+                    {
+                      name      = "aws-iam-token"
+                      mountPath = "/var/run/secrets/eks.amazonaws.com/serviceaccount"
+                      readOnly  = true
+                    }
+                  ]
+                }
+              ]
+              volumes = [
+                {
+                  name = "aws-iam-token"
+                  projected = {
+                    sources = [
+                      {
+                        serviceAccountToken = {
+                          audience          = "sts.amazonaws.com"
+                          expirationSeconds = 86400
+                          path             = "token"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+      serviceAccountTemplate = {
+        metadata = {
+          annotations = {
+            "eks.amazonaws.com/role-arn" = aws_iam_role.crossplane_provider_aws.arn
+          }
+        }
+      }
+    }
+  }
+}
+
 # Wait for Crossplane to be ready and then install AWS Provider via kubectl
 resource "null_resource" "install_crossplane_provider" {
-  depends_on = [helm_release.crossplane]
+  depends_on = [kubernetes_manifest.provider_runtime_config]
 
   provisioner "local-exec" {
     command = <<-EOT
@@ -256,7 +326,7 @@ resource "null_resource" "install_crossplane_provider" {
         sleep 10
       done
 
-      # Create the provider
+      # Create the provider with RuntimeConfig reference
       cat <<EOF | kubectl apply -f -
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
@@ -265,6 +335,10 @@ metadata:
   namespace: crossplane-system
 spec:
   package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.44.0
+  runtimeConfigRef:
+    apiVersion: pkg.crossplane.io/v1beta1
+    kind: DeploymentRuntimeConfig
+    name: provider-aws-config
 EOF
 
       # Wait for provider to be installed
@@ -290,6 +364,7 @@ EOF
   triggers = {
     cluster_name = var.cluster_name
     region       = var.region
+    role_arn     = aws_iam_role.crossplane_provider_aws.arn
   }
 }
 
@@ -306,27 +381,6 @@ resource "null_resource" "create_provider_config" {
   provisioner "local-exec" {
     command = <<-EOT
       export KUBECONFIG=/tmp/kubeconfig-${self.triggers.cluster_name}
-      
-      # First create a ControllerConfig for IRSA
-      cat <<EOF | kubectl apply -f -
-apiVersion: pkg.crossplane.io/v1alpha1
-kind: ControllerConfig
-metadata:
-  name: aws-controller-config
-spec:
-  serviceAccountName: provider-aws
-  annotations:
-    eks.amazonaws.com/role-arn: ${self.triggers.crossplane_role_arn}
-EOF
-
-      # Wait a bit for the ControllerConfig to be processed
-      sleep 10
-      
-      # Update the Provider to use the ControllerConfig
-      kubectl patch provider.pkg.crossplane.io provider-aws -n crossplane-system --type merge -p '{"spec":{"controllerConfigRef":{"name":"aws-controller-config"}}}'
-      
-      # Wait for provider to restart with new config
-      sleep 30
       
       # Create ProviderConfig with InjectedIdentity
       cat <<EOF | kubectl apply -f -

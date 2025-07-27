@@ -1,0 +1,56 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+terraform.tfvars
+terraform.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Sensitive variable files
+secrets.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Local scripts output
+*.log
+*.bak
+*.tmp
+
+# Python virtualenv or cache
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.env
+.venv/
+venv/
+pip-log.txt
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archive files
+*.zip
+*.tar.gz
+*.tar
+*.gz
+
+# Shell history or temporary execution files
+*.sh~
+scripts/*.log
+
+# Custom script-generated JSON/YAML (if any)
+*.generated.json
+*.generated.yaml

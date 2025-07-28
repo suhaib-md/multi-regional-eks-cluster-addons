@@ -1,0 +1,34 @@
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"pkg.crossplane.io/v1","kind":"Provider","metadata":{"annotations":{},"name":"provider-aws"},"spec":{"package":"xpkg.upbound.io/crossplane-contrib/provider-aws:v0.49.0"}}
+  creationTimestamp: "2025-07-28T05:01:47Z"
+  generation: 2
+  name: provider-aws
+  resourceVersion: "34486"
+  uid: 5e8e6514-081c-4f2f-9d8e-b5ec19a76771
+spec:
+  ignoreCrossplaneConstraints: false
+  package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.49.0
+  packagePullPolicy: IfNotPresent
+  revisionActivationPolicy: Automatic
+  revisionHistoryLimit: 1
+  runtimeConfigRef:
+    apiVersion: pkg.crossplane.io/v1beta1
+    kind: DeploymentRuntimeConfig
+    name: provider-aws-config
+  skipDependencyResolution: false
+status:
+  conditions:
+  - lastTransitionTime: "2025-07-28T05:02:44Z"
+    reason: HealthyPackageRevision
+    status: "True"
+    type: Healthy
+  - lastTransitionTime: "2025-07-28T05:01:47Z"
+    reason: ActivePackageRevision
+    status: "True"
+    type: Installed
+  currentIdentifier: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.49.0
+  currentRevision: provider-aws-9420bb96c6f4

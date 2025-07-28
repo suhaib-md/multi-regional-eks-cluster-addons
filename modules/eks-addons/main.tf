@@ -412,6 +412,7 @@ resource "helm_release" "crossplane" {
 }
 
 # Install Crossplane Provider and configuration using kubectl
+# Fix the null_resource to handle provider configuration properly
 resource "null_resource" "install_crossplane_provider" {
   depends_on = [
     helm_release.crossplane,
@@ -426,34 +427,9 @@ resource "null_resource" "install_crossplane_provider" {
       aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region} --kubeconfig /tmp/kubeconfig-${var.cluster_name}
       export KUBECONFIG=/tmp/kubeconfig-${var.cluster_name}
 
-      # Wait for Crossplane CRDs to be available
-      echo "Waiting for Crossplane CRDs to be available..."
-      for i in $(seq 1 120); do
-        if kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
-          echo "Provider CRDs are ready!"
-          break
-        fi
-        echo "Waiting for Crossplane CRDs... ($i/120)"
-        sleep 5
-      done
-
-      # Verify CRDs are ready
-      if ! kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
-        echo "ERROR: Provider CRDs are not available after waiting"
-        exit 1
-      fi
-
-      # Create ServiceAccount for the provider
-      echo "Creating ServiceAccount for provider..."
-      cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: provider-aws
-  namespace: crossplane-system
-  annotations:
-    eks.amazonaws.com/role-arn: ${aws_iam_role.crossplane_provider_aws.arn}
-EOF
+      # Wait for Crossplane to be ready
+      echo "Waiting for Crossplane to be ready..."
+      kubectl wait --for=condition=ready pod -l app=crossplane -n crossplane-system --timeout=300s
 
       # Install the AWS provider
       echo "Installing Crossplane AWS Provider..."
@@ -462,48 +438,20 @@ apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
   name: provider-aws
-  namespace: crossplane-system
 spec:
   package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.49.0
 EOF
 
       # Wait for provider to be installed
       echo "Waiting for AWS provider to be ready..."
-      for i in $(seq 1 180); do
-        INSTALLED=$(kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Installed")].status}' 2>/dev/null || echo "False")
-        HEALTHY=$(kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || echo "False")
-        
-        if [ "$INSTALLED" = "True" ] && [ "$HEALTHY" = "True" ]; then
-          echo "AWS Provider is installed and healthy!"
-          break
-        fi
-        
-        echo "Waiting for AWS provider installation and health... ($i/180) - Installed: $INSTALLED, Healthy: $HEALTHY"
-        
-        # Show provider status for debugging every 30 seconds
-        remainder=$((i % 6))
-        if [ $remainder -eq 0 ]; then
-          echo "Provider status:"
-          kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o wide || true
-          echo "Provider pods:"
-          kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-aws || true
-        fi
-        
-        sleep 10
-      done
+      kubectl wait --for=condition=Installed provider.pkg.crossplane.io/provider-aws --timeout=600s
+      kubectl wait --for=condition=Healthy provider.pkg.crossplane.io/provider-aws --timeout=600s
 
-      # Wait for DeploymentRuntimeConfig CRD to be available
-      echo "Waiting for DeploymentRuntimeConfig CRD..."
-      for i in $(seq 1 60); do
-        if kubectl get crd deploymentruntimeconfigs.pkg.crossplane.io >/dev/null 2>&1; then
-          echo "DeploymentRuntimeConfig CRD is ready!"
-          break
-        fi
-        echo "Waiting for DeploymentRuntimeConfig CRD... ($i/60)"
-        sleep 5
-      done
+      # Get the actual provider revision/service account name
+      PROVIDER_REVISION=$(kubectl get provider.pkg.crossplane.io provider-aws -o jsonpath='{.status.currentRevision}')
+      echo "Provider revision: $PROVIDER_REVISION"
 
-      # Create DeploymentRuntimeConfig for IRSA
+      # Create DeploymentRuntimeConfig with proper service account reference
       echo "Creating DeploymentRuntimeConfig..."
       cat <<EOF | kubectl apply -f -
 apiVersion: pkg.crossplane.io/v1beta1
@@ -516,10 +464,14 @@ spec:
       selector: {}
       template:
         spec:
-          serviceAccountName: provider-aws
+          serviceAccountName: $PROVIDER_REVISION
           containers:
           - name: package-runtime
             env:
+            - name: AWS_REGION
+              value: ${var.region}
+            - name: AWS_DEFAULT_REGION
+              value: ${var.region}
             - name: AWS_ROLE_ARN
               value: ${aws_iam_role.crossplane_provider_aws.arn}
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
@@ -542,30 +494,20 @@ spec:
         eks.amazonaws.com/role-arn: ${aws_iam_role.crossplane_provider_aws.arn}
 EOF
 
-      # Wait a bit for the runtime config to be processed
-      sleep 30
+      # Annotate the provider service account
+      echo "Annotating provider service account..."
+      kubectl annotate serviceaccount $PROVIDER_REVISION -n crossplane-system \
+        eks.amazonaws.com/role-arn=${aws_iam_role.crossplane_provider_aws.arn} --overwrite
 
       # Update the provider to use the runtime config
       echo "Updating provider to use runtime config..."
-      kubectl patch provider provider-aws -n crossplane-system --type='merge' -p='{"spec":{"runtimeConfigRef":{"apiVersion":"pkg.crossplane.io/v1beta1","kind":"DeploymentRuntimeConfig","name":"provider-aws-config"}}}'
+      kubectl patch provider.pkg.crossplane.io provider-aws --type='merge' \
+        -p='{"spec":{"runtimeConfigRef":{"apiVersion":"pkg.crossplane.io/v1beta1","kind":"DeploymentRuntimeConfig","name":"provider-aws-config"}}}'
 
-      # Wait for provider to restart with new config
+      # Wait for provider deployment to restart
       echo "Waiting for provider deployment to restart..."
-      sleep 60
-
-      # Force restart the provider deployment if needed
-      echo "Restarting provider deployment..."
-      kubectl rollout restart deployment -l pkg.crossplane.io/provider=provider-aws -n crossplane-system || true
-      
-      # Wait for rollout to complete
-      for i in $(seq 1 60); do
-        if kubectl rollout status deployment -l pkg.crossplane.io/provider=provider-aws -n crossplane-system --timeout=10s >/dev/null 2>&1; then
-          echo "Provider deployment restarted successfully!"
-          break
-        fi
-        echo "Waiting for provider deployment restart... ($i/60)"
-        sleep 10
-      done
+      sleep 30
+      kubectl rollout status deployment -l pkg.crossplane.io/provider=provider-aws -n crossplane-system --timeout=300s
 
       # Wait for AWS CRDs to be available
       echo "Waiting for AWS CRDs to be available..."
@@ -590,32 +532,15 @@ spec:
     source: InjectedIdentity
 EOF
 
-      # Final status check
-      echo "Final provider status check..."
-      kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o wide
-      echo "Provider deployments:"
-      kubectl get deployments -n crossplane-system -l pkg.crossplane.io/provider=provider-aws
-      echo "Provider pods:"
-      kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-aws
-
       echo "Crossplane AWS Provider installation completed!"
     EOT
   }
 
-  # Clean up kubeconfig on destroy
-  provisioner "local-exec" {
-    when    = destroy
-    command = "rm -f /tmp/kubeconfig-${self.triggers.cluster_name} || true"
-  }
-
-  # Trigger re-creation if cluster changes
   triggers = {
     cluster_name         = var.cluster_name
     region              = var.region
     crossplane_role_arn = aws_iam_role.crossplane_provider_aws.arn
-    # Add a version trigger to force updates when needed
     provider_version    = "v0.49.0"
-    # Add RBAC trigger
-    rbac_version        = "v3"
+    rbac_version        = "v4" # Increment this to force updates
   }
 }

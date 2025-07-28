@@ -72,8 +72,13 @@ resource "aws_iam_role" "crossplane_provider_aws" {
         }
         Condition = {
           StringEquals = {
-            "${var.oidc_provider}:sub" = "system:serviceaccount:crossplane-system:provider-aws-*"
             "${var.oidc_provider}:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "${var.oidc_provider}:sub" = [
+              "system:serviceaccount:crossplane-system:provider-aws",
+              "system:serviceaccount:crossplane-system:provider-aws-*"
+            ]
           }
         }
       }

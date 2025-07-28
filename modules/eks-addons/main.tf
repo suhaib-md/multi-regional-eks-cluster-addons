@@ -57,7 +57,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
   role       = aws_iam_role.ebs_csi_driver.name
 }
 
-# IAM role for Crossplane AWS Provider
+# IAM role for Crossplane AWS Provider with comprehensive permissions for S3 and other AWS services
 resource "aws_iam_role" "crossplane_provider_aws" {
   name = "${var.project_name}-${var.environment}-crossplane-provider-aws-${var.region}"
 
@@ -76,8 +76,7 @@ resource "aws_iam_role" "crossplane_provider_aws" {
           }
           StringLike = {
             "${var.oidc_provider}:sub" = [
-              "system:serviceaccount:crossplane-system:provider-aws",
-              "system:serviceaccount:crossplane-system:provider-aws-*"
+              "system:serviceaccount:crossplane-system:provider-aws*"
             ]
           }
         }
@@ -88,15 +87,179 @@ resource "aws_iam_role" "crossplane_provider_aws" {
   tags = var.tags
 }
 
-# Attach PowerUserAccess policy (you may want to restrict this further)
-resource "aws_iam_role_policy_attachment" "crossplane_provider_aws" {
-  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
-  role       = aws_iam_role.crossplane_provider_aws.name
+# Custom IAM policy for Crossplane with all necessary permissions for S3 and other services
+resource "aws_iam_policy" "crossplane_provider_aws" {
+  name        = "${var.project_name}-${var.environment}-crossplane-provider-aws-${var.region}"
+  description = "IAM policy for Crossplane AWS Provider with comprehensive permissions"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      # S3 Full Access
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:*"
+        ]
+        Resource = "*"
+      },
+      # EC2 Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:*"
+        ]
+        Resource = "*"
+      },
+      # IAM Permissions (needed for role creation and management)
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:*"
+        ]
+        Resource = "*"
+      },
+      # RDS Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "rds:*"
+        ]
+        Resource = "*"
+      },
+      # EKS Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "eks:*"
+        ]
+        Resource = "*"
+      },
+      # Lambda Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "lambda:*"
+        ]
+        Resource = "*"
+      },
+      # CloudFormation Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudformation:*"
+        ]
+        Resource = "*"
+      },
+      # SNS and SQS Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "sns:*",
+          "sqs:*"
+        ]
+        Resource = "*"
+      },
+      # API Gateway Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "apigateway:*"
+        ]
+        Resource = "*"
+      },
+      # Route53 Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "route53:*",
+          "route53resolver:*"
+        ]
+        Resource = "*"
+      },
+      # CloudWatch Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:*",
+          "logs:*"
+        ]
+        Resource = "*"
+      },
+      # KMS Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:*"
+        ]
+        Resource = "*"
+      },
+      # ElastiCache Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticache:*"
+        ]
+        Resource = "*"
+      },
+      # ELB Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:*"
+        ]
+        Resource = "*"
+      },
+      # DynamoDB Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:*"
+        ]
+        Resource = "*"
+      },
+      # ECR Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:*"
+        ]
+        Resource = "*"
+      },
+      # EFS Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:*"
+        ]
+        Resource = "*"
+      },
+      # SSM Permissions
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:*"
+        ]
+        Resource = "*"
+      },
+      # STS Permissions (for assuming roles)
+      {
+        Effect = "Allow"
+        Action = [
+          "sts:AssumeRole",
+          "sts:GetCallerIdentity"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = var.tags
 }
 
-# Attach IAMFullAccess policy for Crossplane to manage IAM resources
-resource "aws_iam_role_policy_attachment" "crossplane_provider_aws_iam" {
-  policy_arn = "arn:aws:iam::aws:policy/IAMFullAccess"
+# Attach the custom policy to Crossplane role
+resource "aws_iam_role_policy_attachment" "crossplane_provider_aws_custom" {
+  policy_arn = aws_iam_policy.crossplane_provider_aws.arn
   role       = aws_iam_role.crossplane_provider_aws.name
 }
 
@@ -111,7 +274,7 @@ resource "aws_eks_addon" "coredns" {
   tags = var.tags
 }
 
-# VPC CNI Add-on (usually installed by default, but we'll manage it)
+# VPC CNI Add-on
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = var.cluster_name
   addon_name                  = "vpc-cni"
@@ -169,6 +332,12 @@ resource "helm_release" "nginx_ingress" {
   version    = "4.8.3"
   namespace  = kubernetes_namespace.nginx_ingress.metadata[0].name
 
+  # Add timeout and retry configurations
+  timeout          = 600
+  cleanup_on_fail  = true
+  wait             = true
+  wait_for_jobs    = true
+
   set {
     name  = "controller.service.type"
     value = "LoadBalancer"
@@ -210,6 +379,12 @@ resource "helm_release" "crossplane" {
   version    = "1.14.5"
   namespace  = kubernetes_namespace.crossplane_system.metadata[0].name
 
+  # Add timeout and retry configurations
+  timeout          = 600
+  cleanup_on_fail  = true
+  wait             = true
+  wait_for_jobs    = true
+
   set {
     name  = "resourcesCrossplane.limits.cpu"
     value = "100m"
@@ -230,161 +405,18 @@ resource "helm_release" "crossplane" {
     value = "256Mi"
   }
 
-  # ✅ Ensure Helm installs CRDs
-  set {
-    name  = "installCRDs"
-    value = "true"
-  }
-
   depends_on = [
     kubernetes_namespace.crossplane_system,
     aws_eks_addon.ebs_csi_driver
   ]
 }
 
-# Wait for Crossplane CRDs to be available
-resource "time_sleep" "wait_for_crossplane_crds" {
-  depends_on      = [helm_release.crossplane]
-  create_duration = "60s"
-}
-
-# Create the provider-aws service account explicitly
-resource "kubernetes_service_account" "crossplane_provider_aws" {
-  metadata {
-    name      = "provider-aws"
-    namespace = kubernetes_namespace.crossplane_system.metadata[0].name
-    annotations = {
-      "eks.amazonaws.com/role-arn" = aws_iam_role.crossplane_provider_aws.arn
-    }
-  }
-
-  depends_on = [time_sleep.wait_for_crossplane_crds]
-}
-
-# Create ClusterRole for Crossplane AWS Provider
-resource "kubernetes_cluster_role" "crossplane_provider_aws" {
-  metadata {
-    name = "crossplane-provider-aws"
-  }
-
-  rule {
-    api_groups = [""]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  rule {
-    api_groups = ["apps"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  rule {
-    api_groups = ["extensions"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  rule {
-    api_groups = ["rbac.authorization.k8s.io"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  rule {
-    api_groups = ["apiextensions.k8s.io"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  # Crossplane core resources
-  rule {
-    api_groups = ["crossplane.io"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  rule {
-    api_groups = ["pkg.crossplane.io"]
-    resources  = ["*"]
-    verbs      = ["*"]
-  }
-
-  # AWS Crossplane CRDs - comprehensive list
-  rule {
-    api_groups = [
-      "athena.aws.crossplane.io",
-      "route53resolver.aws.crossplane.io",
-      "ecr.aws.crossplane.io",
-      "dynamodb.aws.crossplane.io",
-      "s3.aws.crossplane.io",
-      "ec2.aws.crossplane.io",
-      "iam.aws.crossplane.io",
-      "rds.aws.crossplane.io",
-      "eks.aws.crossplane.io",
-      "lambda.aws.crossplane.io",
-      "sns.aws.crossplane.io",
-      "sqs.aws.crossplane.io",
-      "apigateway.aws.crossplane.io",
-      "apigatewayv2.aws.crossplane.io",
-      "batch.aws.crossplane.io",
-      "cloudformation.aws.crossplane.io",
-      "cloudfront.aws.crossplane.io",
-      "cloudtrail.aws.crossplane.io",
-      "cloudwatch.aws.crossplane.io",
-      "cloudwatchlogs.aws.crossplane.io",
-      "docdb.aws.crossplane.io",
-      "efs.aws.crossplane.io",
-      "elasticache.aws.crossplane.io",
-      "elbv2.aws.crossplane.io",
-      "kms.aws.crossplane.io",
-      "route53.aws.crossplane.io"
-    ]
-    resources = ["*"]
-    verbs     = ["*"]
-  }
-
-  depends_on = [helm_release.crossplane]
-}
-
-# Create ClusterRoleBinding for Crossplane AWS Provider
-resource "kubernetes_cluster_role_binding" "crossplane_provider_aws" {
-  metadata {
-    name = "crossplane-provider-aws"
-  }
-
-  role_ref {
-    api_group = "rbac.authorization.k8s.io"
-    kind      = "ClusterRole"
-    name      = kubernetes_cluster_role.crossplane_provider_aws.metadata[0].name
-  }
-
-  subject {
-    kind      = "ServiceAccount"
-    name      = "provider-aws"
-    namespace = kubernetes_namespace.crossplane_system.metadata[0].name
-  }
-
-  # Also bind to any provider-aws-* service accounts (for versioned providers)
-  dynamic "subject" {
-    for_each = ["provider-aws-1a98473eeed4"]
-    content {
-      kind      = "ServiceAccount"
-      name      = subject.value
-      namespace = kubernetes_namespace.crossplane_system.metadata[0].name
-    }
-  }
-
-  depends_on = [helm_release.crossplane]
-}
-
-# Install Crossplane AWS Provider and configuration using kubectl
+# Install Crossplane Provider and configuration using kubectl
 resource "null_resource" "install_crossplane_provider" {
   depends_on = [
-    time_sleep.wait_for_crossplane_crds,
-    kubernetes_service_account.crossplane_provider_aws,
-    kubernetes_cluster_role.crossplane_provider_aws,
-    kubernetes_cluster_role_binding.crossplane_provider_aws
+    helm_release.crossplane,
+    aws_iam_role.crossplane_provider_aws,
+    aws_iam_role_policy_attachment.crossplane_provider_aws_custom
   ]
 
   provisioner "local-exec" {
@@ -396,63 +428,31 @@ resource "null_resource" "install_crossplane_provider" {
 
       # Wait for Crossplane CRDs to be available
       echo "Waiting for Crossplane CRDs to be available..."
-      for i in $(seq 1 60); do
+      for i in $(seq 1 120); do
         if kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
           echo "Provider CRDs are ready!"
           break
         fi
-        echo "Waiting for Crossplane CRDs... ($i/60)"
+        echo "Waiting for Crossplane CRDs... ($i/120)"
         sleep 5
       done
 
-      # Create additional RBAC for provider service accounts
-      echo "Creating additional RBAC permissions..."
+      # Verify CRDs are ready
+      if ! kubectl get crd providers.pkg.crossplane.io >/dev/null 2>&1; then
+        echo "ERROR: Provider CRDs are not available after waiting"
+        exit 1
+      fi
+
+      # Create ServiceAccount for the provider
+      echo "Creating ServiceAccount for provider..."
       cat <<EOF | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: crossplane-provider-aws-extended
-rules:
-- apiGroups: [""]
-  resources: ["secrets", "configmaps", "events", "serviceaccounts"]
-  verbs: ["*"]
-- apiGroups: ["apps"]
-  resources: ["deployments", "replicasets"]
-  verbs: ["*"]
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["apiextensions.k8s.io"]
-  resources: ["customresourcedefinitions"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["rbac.authorization.k8s.io"]
-  resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
-  verbs: ["*"]
-- apiGroups: ["*.aws.crossplane.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["pkg.crossplane.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["crossplane.io"]
-  resources: ["*"]
-  verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: crossplane-provider-aws-extended
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: crossplane-provider-aws-extended
-subjects:
-- kind: ServiceAccount
   name: provider-aws
   namespace: crossplane-system
-- kind: ServiceAccount
-  name: provider-aws-1a98473eeed4
-  namespace: crossplane-system
+  annotations:
+    eks.amazonaws.com/role-arn: ${aws_iam_role.crossplane_provider_aws.arn}
 EOF
 
       # Install the AWS provider
@@ -464,7 +464,7 @@ metadata:
   name: provider-aws
   namespace: crossplane-system
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.44.0
+  package: xpkg.upbound.io/crossplane-contrib/provider-aws:v0.49.0
 EOF
 
       # Wait for provider to be installed
@@ -480,11 +480,13 @@ EOF
         
         echo "Waiting for AWS provider installation and health... ($i/180) - Installed: $INSTALLED, Healthy: $HEALTHY"
         
-        # Show provider status for debugging
-        remainder=$((i % 12))
+        # Show provider status for debugging every 30 seconds
+        remainder=$((i % 6))
         if [ $remainder -eq 0 ]; then
           echo "Provider status:"
-          kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o yaml | grep -A 10 "status:" || true
+          kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o wide || true
+          echo "Provider pods:"
+          kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-aws || true
         fi
         
         sleep 10
@@ -565,6 +567,17 @@ EOF
         sleep 10
       done
 
+      # Wait for AWS CRDs to be available
+      echo "Waiting for AWS CRDs to be available..."
+      for i in $(seq 1 120); do
+        if kubectl get crd buckets.s3.aws.crossplane.io >/dev/null 2>&1; then
+          echo "AWS S3 CRDs are ready!"
+          break
+        fi
+        echo "Waiting for AWS S3 CRDs... ($i/120)"
+        sleep 5
+      done
+
       # Create ProviderConfig
       echo "Creating ProviderConfig..."
       cat <<EOF | kubectl apply -f -
@@ -579,7 +592,7 @@ EOF
 
       # Final status check
       echo "Final provider status check..."
-      kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o yaml
+      kubectl get provider.pkg.crossplane.io provider-aws -n crossplane-system -o wide
       echo "Provider deployments:"
       kubectl get deployments -n crossplane-system -l pkg.crossplane.io/provider=provider-aws
       echo "Provider pods:"
@@ -601,8 +614,8 @@ EOF
     region              = var.region
     crossplane_role_arn = aws_iam_role.crossplane_provider_aws.arn
     # Add a version trigger to force updates when needed
-    provider_version    = "v0.44.0"
+    provider_version    = "v0.49.0"
     # Add RBAC trigger
-    rbac_version        = "v2"
+    rbac_version        = "v3"
   }
 }
